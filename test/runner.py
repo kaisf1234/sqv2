@@ -23,15 +23,15 @@ sys.path.insert(1, "./")
 ######### Important consts ###########
 cuda = torch.cuda.is_available()
 device = torch.device("cuda" if cuda else "cpu")
-batch_size = 4
-accumulate_gradients = 8
+batch_size = 8
+accumulate_gradients = 4
 
-model_store_root = ""
-run_key = ""
+model_store_root = "/content/drive/My Drive/sf/tabert"
+run_key = "tabert_init"
 data_root = "./data_root/clean"
 column_vector_path = "./column_vec/all"
 lr = 1e-3
-lr_bert = 1.5e-6
+lr_bert = 1e-5
 ######### Datasets ###########
 
 train_data, train_tables = read_data(data_root, "train")
@@ -106,7 +106,7 @@ def train():
     start = time.time()
     l = len(train_loader)
     for iB, batch in enumerate(train_loader):
-        if iB % 2 == 1:
+        if iB % 100 == 99:
             print("Done with ", iB, " out of ", l, " time left ", ((time.time() - start) / iB) * (l - iB), " ave loss ",
                   ave_loss / cnt)
 
@@ -114,7 +114,15 @@ def train():
         g_sc, g_sa, g_wn, g_wc, g_wo, g_wv = get_g(sqls)
         g_wvi_corenlp = get_g_wvi_corenlp(batch)
         t_to_tt_idx, tt_to_t_idx, l_q, nlu_tts = get_t_tt_indexes(nlus, tokenizer) # Just need index between words and word-pieces
-        g_wvi = get_g_wvi_bert_from_g_wvi_corenlp(t_to_tt_idx, g_wvi_corenlp)
+        try:
+            #
+            g_wvi = get_g_wvi_bert_from_g_wvi_corenlp(t_to_tt_idx, g_wvi_corenlp)
+        except:
+            # Exception happens when where-condition is not found in nlu_tt.
+            # In this case, that train example is not used.
+            # During test, that example considered as wrongly answered.
+            # e.g. train: 32.
+            continue
 
         tabert_tokenized_tables = tabert_tokenize_tables(headers, values, [query["table_id"] for query in batch], tokenizer)
         tabert_contexts = tabert_get_contexts(nlus, tokenizer)
@@ -201,9 +209,122 @@ def train():
 
     return acc, aux_out
 
+
+
+
+
+def test():
+    model.eval()
+    model_bert.eval()
+    ave_loss = 0
+    cnt = 0  # count the # of examples
+    cnt_sc = 0  # count the # of correct predictions of select column
+    cnt_sa = 0  # of selectd aggregation
+    cnt_wn = 0  # of where number
+    cnt_wc = 0  # of where column
+    cnt_wo = 0  # of where operator
+    cnt_wv = 0  # of where-value
+    cnt_wvi = 0  # of where-value index (on question tokens)
+    cnt_lx = 0  # of logical form acc
+    cnt_x = 0  # of execution acc
+    start = time.time()
+    l = len(dev_loader)
+    for iB, batch in enumerate(dev_loader):
+        if iB % 100 == 99:
+            print("Done with ", iB, " out of ", l, " time left ", ((time.time() - start) / iB) * (l - iB), " ave loss ",
+                  ave_loss / cnt)
+
+        nlus, sqls, headers, values, nlu_origs = pre_proc(batch, dev_tables, dev_column_vectors)
+        g_sc, g_sa, g_wn, g_wc, g_wo, g_wv = get_g(sqls)
+        g_wvi_corenlp = get_g_wvi_corenlp(batch)
+        t_to_tt_idx, tt_to_t_idx, l_q, nlu_tts = get_t_tt_indexes(nlus, tokenizer) # Just need index between words and word-pieces
+        try:
+            #
+            g_wvi = get_g_wvi_bert_from_g_wvi_corenlp(t_to_tt_idx, g_wvi_corenlp)
+        except:
+            # Exception happens when where-condition is not found in nlu_tt.
+            # In this case, that train example is not used.
+            # During test, that example considered as wrongly answered.
+            # e.g. train: 32.
+            continue
+
+        tabert_tokenized_tables = tabert_tokenize_tables(headers, values, [query["table_id"] for query in batch], tokenizer)
+        tabert_contexts = tabert_get_contexts(nlus, tokenizer)
+        context_encoding, column_encoding, info_dict = model_bert.encode(
+            contexts=tabert_contexts,
+            tables=tabert_tokenized_tables
+        )
+        s_sc, s_sa, s_wn, s_wc, s_wo, s_wv = model.forward(context_encoding, l_q, column_encoding, [len(x) for x in headers], g_wn)
+        loss = Loss_sw_se(s_sc, s_sa, s_wn, s_wc, s_wo, s_wv, g_sc, g_sa, g_wn, g_wc, g_wo, g_wvi)
+
+        pr_sc, pr_sa, pr_wn, pr_wc, pr_wo, pr_wvi = pred_sw_se(s_sc, s_sa, s_wn, s_wc, s_wo, s_wv, g_wn)
+        pr_wv_str, pr_wv_str_wp = convert_pr_wvi_to_string(pr_wvi, nlus, nlu_tts, tt_to_t_idx)
+
+        # Sort pr_wc:
+        #   Sort pr_wc when training the model as pr_wo and pr_wvi are predicted using ground-truth where-column (g_wc)
+        #   In case of 'dev' or 'test', it is not necessary as the ground-truth is not used during inference.
+        pr_wc_sorted = sort_pr_wc(pr_wc, g_wc)
+        pr_sql_i = generate_sql_i(pr_sc, pr_sa, pr_wn, pr_wc_sorted, pr_wo, pr_wv_str, nlu_origs)
+
+        # Cacluate accuracy
+        cnt_sc1_list, cnt_sa1_list, cnt_wn1_list, \
+        cnt_wc1_list, cnt_wo1_list, \
+        cnt_wvi1_list, cnt_wv1_list = get_cnt_sw_list(g_sc, g_sa, g_wn, g_wc, g_wo, g_wvi,
+                                                      pr_sc, pr_sa, pr_wn, pr_wc, pr_wo, pr_wvi,
+                                                      sqls, pr_sql_i,
+                                                      mode='train')
+
+        cnt_lx1_list = get_cnt_lx_list(cnt_sc1_list, cnt_sa1_list, cnt_wn1_list, cnt_wc1_list,
+                                       cnt_wo1_list, cnt_wv1_list)
+        # lx stands for logical form accuracy
+        # Execution accuracy test.
+        cnt_x1_list, g_ans, pr_ans = cnt_lx1_list, [], [],  # get_cnt_x_list(engine, tb, g_sc, g_sa, sql_i, pr_sc, pr_sa, pr_sql_i)
+
+        # statistics
+        ave_loss += loss.item()
+
+        # count
+        cnt += len(nlus)
+        cnt_sc += sum(cnt_sc1_list)
+        cnt_sa += sum(cnt_sa1_list)
+        cnt_wn += sum(cnt_wn1_list)
+        cnt_wc += sum(cnt_wc1_list)
+        cnt_wo += sum(cnt_wo1_list)
+        cnt_wvi += sum(cnt_wvi1_list)
+        cnt_wv += sum(cnt_wv1_list)
+        cnt_lx += sum(cnt_lx1_list)
+        cnt_x += sum(cnt_x1_list)
+
+    ave_loss /= cnt
+    acc_sc = cnt_sc / cnt
+    acc_sa = cnt_sa / cnt
+    acc_wn = cnt_wn / cnt
+    acc_wc = cnt_wc / cnt
+    acc_wo = cnt_wo / cnt
+    acc_wvi = cnt_wvi / cnt
+    acc_wv = cnt_wv / cnt
+    acc_lx = cnt_lx / cnt
+    acc_x = cnt_x / cnt
+
+    acc = [ave_loss, acc_sc, acc_sa, acc_wn, acc_wc, acc_wo, acc_wvi, acc_wv, acc_lx, acc_x]
+
+    aux_out = 1
+
+    return acc, aux_out
+
+
+
+
+
+
+
 for epoch in range(100):
+    with torch.no_grad():
+        acc_dev, _ = test()
+    print_result(epoch, acc_dev, 'dev')
     acc_train, _ = train()
     print_result(epoch, acc_train, 'train')
+    print("Saving...")
     state = {'model': model.state_dict()}
     torch.save(state, os.path.join(model_store_root, run_key + str(epoch) + 'model_best_orig.pt'))
 
