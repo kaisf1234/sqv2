@@ -132,8 +132,9 @@ class BertVerticalLayer(nn.Module):
 class SpanBasedPrediction(nn.Module):
     def __init__(self, config: TableBertConfig, prediction_layer: BertLMPredictionHead):
         super(SpanBasedPrediction, self).__init__()
-        
+        config.layer_norm_eps = 1e-8
         self.dense1 = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+
         self.layer_norm1 = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dense2 = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         self.layer_norm2 = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)

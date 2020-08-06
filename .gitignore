@@ -228,3 +228,6 @@ dmypy.json
 .pyre/
 
 # End of https://www.gitignore.io/api/macos,python,pycharm
+/third_party/
+.idea/
+/test/tabert_base_k3/
